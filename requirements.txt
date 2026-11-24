@@ -1,0 +1,4 @@
+natasha>=1.6
+python-docx>=1.1
+# pymorphy2 (внутри natasha) использует pkg_resources, которого нет в новых setuptools
+setuptools<81

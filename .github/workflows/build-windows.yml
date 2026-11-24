@@ -1,0 +1,63 @@
+name: Build Nemo.exe
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller pytest
+
+      - name: Tests
+        run: python -m pytest -q
+
+      - name: Selftest
+        run: python app.py --selftest
+
+      - name: Build
+        run: >
+          pyinstaller --noconfirm --windowed --name Nemo
+          --collect-all natasha --collect-all slovnet --collect-all navec
+          --collect-all razdel --collect-all yargy
+          --collect-all pymorphy2 --collect-all pymorphy2_dicts_ru --copy-metadata pymorphy2_dicts_ru
+          --hidden-import docx
+          app.py
+
+      - name: Selftest of built exe
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\Nemo\Nemo.exe -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content "$env:APPDATA\Nemo\selftest.log"
+          if ($p.ExitCode -ne 0) { exit 1 }
+
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\Nemo -DestinationPath Nemo-windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nemo-windows
+          path: Nemo-windows.zip
+
+      - name: Release (on tag)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Nemo-windows.zip
