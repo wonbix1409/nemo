@@ -88,3 +88,12 @@ def test_natasha_names_grouped(ner):
     assert masked.count("[ЧЕЛОВЕК_1]") == 2            # падежи сведены в одну метку
     restored, _, _ = s.restore("[ЧЕЛОВЕК_1] и [ЧЕЛОВЕК_2]")
     assert restored == "Иванов Иван Петрович и Петрова Анна"
+
+
+def test_fio_on_own_line_and_noise(ner):
+    s = Session()
+    masked, _ = s.anonymize(
+        "РЕЗЮМЕ\n\nМиронов Святослав Игоревич\n\nЖелаемая должность: сметчик. "
+        "Согласование КС-2 и КС-3. Шпаков подписал акт.", ner=ner)
+    assert "Миронов" not in masked and "Шпаков" not in masked   # ФИО и редкая фамилия скрыты
+    assert "Желаемая" in masked and "КС-3" in masked            # обычные слова и формы не тронуты

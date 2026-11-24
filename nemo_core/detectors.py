@@ -162,6 +162,11 @@ RE_ADDR = re.compile(
     r"(?:,\s*(?:д\.|дом)\s*\d+[а-яА-Я]?(?:/\d+)?)?"
     r"(?:,\s*(?:кв\.|квартира|оф\.|офис|корп\.|корпус|стр\.|строение|пом\.)\s*\d+[а-яА-Я]?)*"
 )
+# Фамилия Имя Отчество в любом падеже — отчество узнаём по окончанию (-вич/-вна/-ична…)
+RE_FIO_FULL = re.compile(
+    r"(?<![А-ЯЁа-яё])[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?\s+[А-ЯЁ][а-яё]+\s+"
+    r"[А-ЯЁ][а-яё]+(?:вич|вн|ичн)[а-яё]{0,3}(?![А-ЯЁа-яё])"
+)
 RE_FIO_INITIALS = re.compile(
     r"(?<![А-ЯЁа-яё])(?:[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?\s+[А-ЯЁ]\.\s?[А-ЯЁ]\."
     r"|[А-ЯЁ]\.\s?[А-ЯЁ]\.\s?[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?)"
@@ -205,6 +210,8 @@ def find_regex(text: str) -> list[Entity]:
         add(m.start(), m.end(), "ORG")
     for m in RE_ADDR.finditer(text):
         add(m.start(), m.end(), "ADDR")
+    for m in RE_FIO_FULL.finditer(text):
+        add(m.start(), m.end(), "PER")
     for m in RE_FIO_INITIALS.finditer(text):
         add(m.start(), m.end(), "PER")
     return out
@@ -236,8 +243,23 @@ STOP_WORDS = {
 }
 
 
-def _is_noise(kind: str, text: str) -> bool:
+def _is_noise(kind: str, text: str, vocab=None) -> bool:
     t = text.strip(" «»\"'").lower().replace("ё", "е")
+    if kind in ("ORG", "LOC") and any(c.isdigit() for c in t):
+        return True          # «КС-3», «Приложение 1» — формы и номера, а не названия
+    if kind == "PER" and vocab is not None and len(t.split()) == 1:
+        # Одно слово с большой буквы («Желаемая»). Выбрасываем, только если это точно
+        # не существительное: незнакомую фамилию лучше скрыть лишний раз, чем пропустить.
+        try:
+            parses = vocab.parse(t)
+            top = parses[0].tag if parses else None
+            names = any({"Name", "Surn", "Patr"} & set(str(p.tag).replace(" ", ",").split(","))
+                        for p in parses)
+            if top is not None and not names and top.POS in {
+                    "ADJF", "ADJS", "PRTF", "PRTS", "VERB", "INFN", "ADVB", "PREP", "CONJ", "PRCL"}:
+                return True
+        except Exception:
+            pass
     if t in STOP_WORDS:
         return True
     first = t.split()[0] if t.split() else ""
@@ -279,7 +301,7 @@ class NatashaNER:
         doc.tag_ner(p["ner"])
         out = []
         for sp in doc.spans:
-            if sp.type not in ("PER", "ORG", "LOC") or _is_noise(sp.type, sp.text):
+            if sp.type not in ("PER", "ORG", "LOC") or _is_noise(sp.type, sp.text, p["vocab"]):
                 continue
             try:
                 sp.normalize(p["vocab"])
@@ -296,7 +318,7 @@ def resolve_overlaps(entities: list[Entity]) -> list[Entity]:
     """Оставляет непересекающиеся фрагменты: важнее тип, потом длиннее."""
     ranked = sorted(
         entities,
-        key=lambda e: (-PRIORITY.get(e.kind, 0), -(e.end - e.start), e.start),
+        key=lambda e: (-PRIORITY.get(e.kind, 0), -(e.end - e.start), e.source != "natasha", e.start),
     )
     taken: list[Entity] = []
     for e in ranked:
