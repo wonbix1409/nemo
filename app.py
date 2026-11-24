@@ -18,7 +18,7 @@ from nemo_core.detectors import NatashaNER
 from nemo_core.files import read_text_file
 
 APP_NAME = "Немо"
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 KIND_NAMES = {
     "PER": "Человек", "ORG": "Организация", "LOC": "Место", "ADDR": "Адрес",
     "INN": "ИНН", "SNILS": "СНИЛС", "OGRN": "ОГРН", "KPP": "КПП", "BIK": "БИК",

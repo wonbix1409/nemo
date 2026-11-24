@@ -112,7 +112,7 @@ def ogrn_valid(s: str) -> bool:
 
 def luhn_valid(s: str) -> bool:
     d = _digits(s)
-    if not 13 <= len(d) <= 19:
+    if not 16 <= len(d) <= 19:
         return False
     total = 0
     for i, x in enumerate(reversed(d)):
@@ -131,12 +131,13 @@ NA = r"(?![\d\w])"    # нет цифры/буквы справа
 
 RE_EMAIL = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-zа-я]{2,}", re.I)
 RE_SNILS = re.compile(NB + r"\d{3}[- ]?\d{3}[- ]?\d{3}[- ]?\d{2}" + NA)
-RE_CARD = re.compile(NB + r"\d{4}(?:[ -]?\d{4}){2,3}(?:[ -]?\d{1,3})?" + NA)
+RE_CARD = re.compile(NB + r"\d{4}(?:[ -]?\d{4}){3}(?:[ -]?\d{1,3})?" + NA)   # 16–19 цифр
 RE_ACCOUNT = re.compile(NB + r"\d{5}[ .]?\d{3}[ .]?\d[ .]?\d{4}[ .]?\d{7}" + NA)  # 20 цифр
 RE_OGRN = re.compile(NB + r"\d{13}(?:\d{2})?" + NA)
 RE_INN = re.compile(NB + r"\d{10}(?:\d{2})?" + NA)
 RE_KPP = re.compile(r"(КПП)\s*[:№]?\s*(\d{9})" + NA, re.I)
 RE_BIK = re.compile(r"(БИК)\s*[:№]?\s*(\d{9})" + NA, re.I)
+RE_OGRN_CTX = re.compile(r"(ОГРНИП|ОГРН)\s*[:№]?\s*(\d{13}(?:\d{2})?)" + NA, re.I)
 RE_INN_CTX = re.compile(r"(ИНН)\s*[:№]?\s*(\d{10}(?:\d{2})?)" + NA, re.I)
 RE_PHONE = re.compile(
     NB + r"(?:\+7|8)[\s\-]*\(?\d{3}\)?[\s\-]*\d{3}[\s\-]*\d{2}[\s\-]*\d{2}" + NA
@@ -156,7 +157,7 @@ RE_IP = re.compile(
     r"(?:\s+[А-ЯЁ]\.\s?[А-ЯЁ]\.?|(?:\s+[А-ЯЁ][а-яё]+){1,2})?"
 )
 RE_ADDR = re.compile(
-    r"(?<![А-ЯЁа-яё])(?:ул\.|улица|пр-т|просп\.|проспект|пер\.|переулок|бульвар|б-р|"
+    r"(?<![А-ЯЁа-яё])(?:ул\.|улица|пр-т|просп\.|пр\.|проспект|пер\.|переулок|бульвар|б-р|"
     r"шоссе|ш\.|наб\.|набережная|пл\.|площадь|мкр\.|микрорайон|тракт)\s*"
     r"[А-ЯЁ0-9][^,;\n]{1,40}"
     r"(?:,\s*(?:д\.|дом)\s*\d+[а-яА-Я]?(?:/\d+)?)?"
@@ -188,6 +189,8 @@ def find_regex(text: str) -> list[Entity]:
             add(m.start(2), m.end(2), kind)
     for m in RE_INN_CTX.finditer(text):
         add(m.start(2), m.end(2), "INN")
+    for m in RE_OGRN_CTX.finditer(text):
+        add(m.start(2), m.end(2), "OGRN")
     for m in RE_CARD.finditer(text):
         if luhn_valid(m.group()):
             add(m.start(), m.end(), "CARD")
@@ -207,7 +210,9 @@ def find_regex(text: str) -> list[Entity]:
     for m in RE_ORG.finditer(text):
         add(m.start(), m.end(), "ORG")
     for m in RE_IP.finditer(text):
-        add(m.start(), m.end(), "ORG")
+        # «ИП» оставляем видимым, скрываем человека: «ИП [ЧЕЛОВЕК_1]»
+        name_start = m.start() + len(re.match(r"ИП\s+", m.group()).group())
+        add(name_start, m.end(), "PER")
     for m in RE_ADDR.finditer(text):
         add(m.start(), m.end(), "ADDR")
     for m in RE_FIO_FULL.finditer(text):
@@ -240,6 +245,11 @@ STOP_WORDS = {
     "работник", "агент", "принципал", "доверитель", "поверенный", "лицензиар",
     "лицензиат", "заемщик", "заимодавец", "кредитор", "должник", "клиент", "банк",
     "устав", "приложение", "акт", "счет", "договор",
+    # страны не скрываем: они не указывают на человека, а метка сбивает нейросеть («гражданин [МЕСТО_2]»)
+    "россия", "рф", "российская федерация",
+    # госорганы и суды: публичные, а метки ломают фразы вроде «выдан [ОРГ] [ОРГ]»
+    "мвд", "гу", "гу мвд", "уфмс", "оуфмс", "фмс", "фнс", "ифнс", "пфр", "сфр", "фсс", "гибдд",
+    "фссп", "росреестр", "ип", "суд", "арбитражный суд", "районный суд", "мировой суд",
 }
 
 
@@ -262,6 +272,13 @@ def _is_noise(kind: str, text: str, vocab=None) -> bool:
             pass
     if t in STOP_WORDS:
         return True
+    if vocab is not None and len(t.split()) <= 2:
+        try:
+            lemma = " ".join(vocab.parse(w)[0].normal for w in t.split()).replace("ё", "е")
+            if lemma in STOP_WORDS:
+                return True
+        except Exception:
+            pass
     first = t.split()[0] if t.split() else ""
     if kind == "ORG" and first in {"договор", "соглашение", "контракт", "акт", "приложение", "счет"}:
         return True
@@ -317,6 +334,11 @@ class NatashaNER:
                 continue
             if _is_noise(sp.type, sp.text, p["vocab"]):
                 continue
+            ip = re.match(r"ИП\s+(?=[А-ЯЁ])", sp.text)
+            if sp.type == "ORG" and ip:
+                a = sp.start + ip.end()
+                out.append(Entity(a, sp.stop, "PER", text[a:sp.stop], source="natasha-ip"))
+                continue
             try:
                 sp.normalize(p["vocab"])
                 normal = sp.normal or sp.text
@@ -332,10 +354,168 @@ def resolve_overlaps(entities: list[Entity]) -> list[Entity]:
     """Оставляет непересекающиеся фрагменты: важнее тип, потом длиннее."""
     ranked = sorted(
         entities,
-        key=lambda e: (-PRIORITY.get(e.kind, 0), -(e.end - e.start), e.source != "natasha", e.start),
+        key=lambda e: (-(PRIORITY.get(e.kind, 0) if PRIORITY.get(e.kind, 0) >= 60 else 40),
+                       -(e.end - e.start), -PRIORITY.get(e.kind, 0), e.source != "natasha", e.start),
     )
     taken: list[Entity] = []
     for e in ranked:
         if all(e.end <= t.start or e.start >= t.end for t in taken):
             taken.append(e)
     return sorted(taken, key=lambda e: e.start)
+
+
+# ---------------------------------------------------------------- ФИО: нормализация и подпись
+
+_RE_PATR_M = re.compile(r"^(.+?(?:вич|ич))(?:а|у|ем|е)?$")
+_RE_PATR_F = re.compile(r"^(.+?(?:вн|чн))(?:а|ы|е|ой|у|ою)$")
+
+
+def is_patronymic(word: str) -> bool:
+    w = word.lower()
+    return bool(re.search(r"(?:вич|вн|ичн)[а-яё]{0,3}$", w)) and len(w) > 5
+
+
+def _norm_patronymic(word: str) -> tuple[str, str | None]:
+    """Отчество в именительный падеж по правилам — без словаря, чтобы не менять написание."""
+    w = word
+    m = _RE_PATR_F.match(w.lower())
+    if m:
+        return w[:len(m.group(1))] + "а", "femn"
+    m = _RE_PATR_M.match(w.lower())
+    if m:
+        return w[:len(m.group(1))], "masc"
+    return w, None
+
+
+_RE_SURN = re.compile(r"^(.+?(?:ов|ев|ёв|ин|ын|ский|цкий))(а|у|ым|ом|е|ой|ую|ою|ого|ому|им)?$", re.I)
+
+
+def _norm_surname(word: str, gender: str | None) -> str | None:
+    """Фамилии на -ов/-ев/-ин/-ский — по правилам. None, если правило не подходит."""
+    low = word.lower()
+    if low.endswith(("ский", "цкий", "ская", "цкая")):
+        return word
+    m = re.match(r"^(.+?(?:ск|цк))(ого|ому|им|ом|ой|ую|ая)$", low)
+    if m:
+        base = word[:len(m.group(1))]
+        return base + ("ая" if gender == "femn" else "ий")
+    m = re.match(r"^(.+?(?:ов|ев|ёв|ин|ын))(а|у|ым|ом|е|ой|ою)?$", low)
+    if not m:
+        return None
+    base = word[:len(m.group(1))]
+    if gender == "femn":
+        return base + "а"
+    if gender == "masc":
+        return base
+    return word if m.group(2) in (None, "а") else base
+
+
+def _raw_parse(vocab, word):
+    import pymorphy2
+    return pymorphy2.MorphAnalyzer.parse(vocab, word)
+
+
+def _nomn(vocab, word: str, want: str, gender: str | None) -> str:
+    """Имя в именительный падеж. Если словарь меняет основу — оставляем как было."""
+    if vocab is None:
+        return word
+    try:
+        parses = _raw_parse(vocab, word)
+    except Exception:
+        return word
+    cand = [p for p in parses if want in p.tag] or parses
+    for p in cand:
+        for f in p.lexeme:
+            t = f.tag
+            if "nomn" in t and "plur" not in t and (gender is None or t.gender in (gender, None) or "ms-f" in t):
+                new = f.word
+                stem = len(word) - 3
+                if new[:max(stem, 2)].lower() == word[:max(stem, 2)].lower() or len(word) <= 4:
+                    return new[:1].upper() + new[1:]
+                return word
+    return word
+
+
+def normalize_fio(text: str, vocab=None) -> str:
+    """«Мироновым Святославом Игоревичем» → «Миронов Святослав Игоревич». Инициалы не трогаем."""
+    words = text.split()
+    if not words or any("." in w for w in words):
+        return text
+    if len(words) == 3 and is_patronymic(words[2]):
+        patr, gender = _norm_patronymic(words[2])
+        surn = _norm_surname(words[0], gender)
+        if surn is None:   # Ткаченко, Гусейн-заде и пр. — несклоняемые или редкие: не трогаем
+            surn = words[0]
+        return " ".join([surn, _nomn(vocab, words[1], "Name", gender), patr])
+    if len(words) == 2 and is_patronymic(words[1]):
+        patr, gender = _norm_patronymic(words[1])
+        return " ".join([_nomn(vocab, words[0], "Name", gender), patr])
+    return text
+
+
+def person_signature(name: str) -> dict:
+    """Подпись человека для сведения вариантов: фамилия + инициалы (и полные имя/отчество, если есть)."""
+    n = name.replace("ё", "е").replace("Ё", "Е").strip()
+    m = re.fullmatch(r"([А-ЯЕ][а-яе-]+)\s+([А-ЯЕ])\.\s?([А-ЯЕ])\.?", n)
+    if m:
+        return dict(surn=m.group(1).lower(), i=m.group(2), o=m.group(3))
+    m = re.fullmatch(r"([А-ЯЕ])\.\s?([А-ЯЕ])\.\s?([А-ЯЕ][а-яе-]+)", n)
+    if m:
+        return dict(surn=m.group(3).lower(), i=m.group(1), o=m.group(2))
+    w = n.split()
+    if len(w) == 3 and is_patronymic(w[2]):
+        return dict(surn=w[0].lower(), i=w[1][0], o=w[2][0], name=w[1].lower(), patr=w[2].lower())
+    if len(w) == 2 and is_patronymic(w[1]):
+        return dict(i=w[0][0], o=w[1][0], name=w[0].lower(), patr=w[1].lower())
+    return {}
+
+
+def same_person(a: dict, b: dict) -> bool:
+    if not a or not b or a.get("i") != b.get("i") or a.get("o") != b.get("o"):
+        return False
+    if a.get("surn") and b.get("surn"):
+        sa, sb = a["surn"], b["surn"]
+        # «Белоусов» / «Белоусова»: допускаем женскую форму той же фамилии
+        if not (sa == sb or sa.rstrip("а") == sb.rstrip("а")):
+            return False
+        return all(a.get(k) == b.get(k) for k in ("name", "patr") if a.get(k) and b.get(k))
+    # «Аркадий Геннадьевич» без фамилии — совпадают полные имя и отчество
+    return bool(a.get("name") and a.get("name") == b.get("name") and a.get("patr") == b.get("patr"))
+
+
+def fullness(sig: dict) -> int:
+    return (2 if sig.get("surn") else 0) + (1 if sig.get("name") else 0)
+
+
+_NON_NAME_POS = {"VERB", "INFN", "ADVB", "PREP", "CONJ", "PRCL", "INTJ", "ADJF", "ADJS", "PRTF", "GRND", "NPRO"}
+
+
+def trim_person(e: Entity, vocab) -> Entity | None:
+    """Срезает с краёв ФИО слова, которые точно не имена: «Звоните Аркадию Геннадьевичу» → «Аркадию Геннадьевичу»."""
+    if vocab is None:
+        return e
+    tokens = [(m.start(), m.end(), m.group()) for m in re.finditer(r"\S+", e.text)]
+
+    def not_name(w: str) -> bool:
+        w = w.strip(".,;:!?«»\"()")
+        if re.fullmatch(r"(?:[А-ЯЁ]\.\s?){1,2}", w + ("" if w.endswith(".") else ".")) and len(w) <= 4:
+            return False                          # инициалы
+        try:
+            ps = _raw_parse(vocab, w.lower())
+        except Exception:
+            return False
+        if any({"Name", "Surn", "Patr"} & set(str(p.tag).replace(" ", ",").split(",")) for p in ps):
+            return False
+        return bool(ps) and ps[0].tag.POS in _NON_NAME_POS
+
+    while tokens and not_name(tokens[0][2]):
+        tokens.pop(0)
+    while tokens and not_name(tokens[-1][2]):
+        tokens.pop()
+    if not tokens:
+        return None
+    a, b = tokens[0][0], tokens[-1][1]
+    if (a, b) == (0, len(e.text)):
+        return e
+    t = e.text[a:b]
+    return Entity(e.start + a, e.start + b, e.kind, t, normal="", source=e.source)
