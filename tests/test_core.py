@@ -97,3 +97,46 @@ def test_fio_on_own_line_and_noise(ner):
         "Согласование КС-2 и КС-3. Шпаков подписал акт.", ner=ner)
     assert "Миронов" not in masked and "Шпаков" not in masked   # ФИО и редкая фамилия скрыты
     assert "Желаемая" in masked and "КС-3" in masked            # обычные слова и формы не тронуты
+
+
+def test_same_person_forms(ner):
+    s = Session()
+    t = ("в лице директора Белоусова Аркадия Геннадьевича. Подписал Белоусов А.Г. "
+         "Звоните Аркадию Геннадьевичу. Подпись: А.Г. Белоусов")
+    masked, _ = s.anonymize(t, ner=ner)
+    assert "Белоусов" not in masked and "Аркади" not in masked
+    assert "[ЧЕЛОВЕК_2" not in masked                               # один человек — один номер
+    assert "[ЧЕЛОВЕК_1.ИО]" in masked and "[ЧЕЛОВЕК_1.ИНИЦ]" in masked
+    out, _, _ = s.restore("[ЧЕЛОВЕК_1], [ЧЕЛОВЕК_1.ИО], [ЧЕЛОВЕК_1.ИНИЦ]")
+    assert out == "Белоусов Аркадий Геннадьевич, Аркадий Геннадьевич, Белоусов А.Г."
+
+
+def test_surnames_not_damaged(ner):
+    s = Session()
+    s.anonymize("Шпакова Дмитрия Олеговича, Корниловой Вероники Андреевны, "
+                "Исмаилова Руслана Маратовича", ner=ner)
+    vals = sorted(it.value for it in s.items.values())
+    assert vals == ["Исмаилов Руслан Маратович", "Корнилова Вероника Андреевна",
+                    "Шпаков Дмитрий Олегович"]
+
+
+def test_ogrn_not_card_and_public_bodies(ner):
+    s = Session()
+    masked, _ = s.anonymize("ОГРН 1093208196729. Паспорт выдан ГУ МВД России по Пермскому краю. "
+                            "Гражданин РФ. Обратимся в Арбитражный суд.", ner=ner)
+    assert "[ОГРН_1]" in masked and "КАРТА" not in masked
+    for w in ("МВД", "России", "РФ", "Арбитражный суд"):
+        assert w in masked, w
+
+
+def test_ip_keeps_prefix(ner):
+    s = Session()
+    masked, _ = s.anonymize("Получатель: ИП Гусейнова Лейла Рашидовна. Подпись: Гусейнова Л.Р.", ner=ner)
+    assert "ИП [ЧЕЛОВЕК_1]" in masked and "[ЧЕЛОВЕК_1.ИНИЦ]" in masked
+
+
+def test_derived_forms_and_initials_gender(ner):
+    s = Session()
+    s.anonymize("Должник: Захарьин Тимофей Павлович. Подпись: ИП Гусейнова Л.Р.", ner=ner)
+    out, _, _ = s.restore("Уважаемый [ЧЕЛОВЕК_1.ИО]! Ответственный: [ЧЕЛОВЕК_1.ИНИЦ], [ЧЕЛОВЕК_2]")
+    assert out == "Уважаемый Тимофей Павлович! Ответственный: Захарьин Т.П., Гусейнова Л.Р."
