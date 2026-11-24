@@ -372,7 +372,17 @@ def selftest() -> int:
     return 0 if ok else 1
 
 
+def _utf8_console():
+    """Консоль Windows по умолчанию в cp1252/cp866 — русский текст падает с UnicodeEncodeError."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:  # None в оконной сборке или старый поток
+            pass
+
+
 def main():
+    _utf8_console()
     _fix_frozen_paths()
     if "--selftest" in sys.argv:
         sys.exit(selftest())
