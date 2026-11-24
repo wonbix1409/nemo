@@ -301,7 +301,21 @@ class NatashaNER:
         doc.tag_ner(p["ner"])
         out = []
         for sp in doc.spans:
-            if sp.type not in ("PER", "ORG", "LOC") or _is_noise(sp.type, sp.text, p["vocab"]):
+            if sp.type not in ("PER", "ORG", "LOC"):
+                continue
+            if "\n" in sp.text:
+                # Модель иногда склеивает строки («Миронов С.И.\n\nЖелаемая») — режем по переносам
+                pos = sp.start
+                for part in sp.text.split("\n"):
+                    lead = len(part) - len(part.lstrip())
+                    chunk = part.strip()
+                    if chunk and not _is_noise(sp.type, chunk, p["vocab"]):
+                        a = pos + lead
+                        out.append(Entity(a, a + len(chunk), sp.type, chunk, normal=chunk,
+                                          source="natasha-split"))
+                    pos += len(part) + 1
+                continue
+            if _is_noise(sp.type, sp.text, p["vocab"]):
                 continue
             try:
                 sp.normalize(p["vocab"])
