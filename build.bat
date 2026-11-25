@@ -18,7 +18,7 @@ pyinstaller --noconfirm --windowed --name Nemo ^
   --collect-all natasha --collect-all slovnet --collect-all navec ^
   --collect-all razdel --collect-all yargy ^
   --collect-all pymorphy2 --collect-all pymorphy2_dicts_ru --copy-metadata pymorphy2_dicts_ru ^
-  --hidden-import docx ^
+  --hidden-import docx --icon assets\nemo.ico --add-data "assets;assets" ^
   app.py
 if errorlevel 1 ( echo [Nemo] Build failed. & pause & exit /b 1 )
 

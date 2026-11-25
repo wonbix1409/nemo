@@ -42,6 +42,7 @@ jobs:
           --collect-all razdel --collect-all yargy
           --collect-all pymorphy2 --collect-all pymorphy2_dicts_ru --copy-metadata pymorphy2_dicts_ru
           --hidden-import docx
+          --icon assets/nemo.ico --add-data "assets;assets"
           app.py
 
       - name: Selftest of built exe
@@ -51,17 +52,45 @@ jobs:
           Get-Content "$env:APPDATA\Nemo\selftest.log"
           if ($p.ExitCode -ne 0) { exit 1 }
 
+      - name: Version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path app.py -Pattern '^VERSION = "(.+)"').Matches[0].Groups[1].Value
+          "version=$v" >> $env:GITHUB_OUTPUT
+
       - name: Zip
         shell: pwsh
-        run: Compress-Archive -Path dist\Nemo -DestinationPath Nemo-windows.zip
+        run: Compress-Archive -Path dist\Nemo -DestinationPath Nemo-${{ steps.ver.outputs.version }}-windows.zip
+
+      - name: Installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /DAppVersion=${{ steps.ver.outputs.version }} installer\nemo.iss
+
+      - name: Installer silent install test
+        shell: pwsh
+        run: |
+          $p = Start-Process "dist\Nemo-Setup-${{ steps.ver.outputs.version }}.exe" -ArgumentList "/VERYSILENT","/SUPPRESSMSGBOXES","/NORESTART" -Wait -PassThru
+          if ($p.ExitCode -ne 0) { exit 1 }
+          $exe = "$env:LOCALAPPDATA\Programs\Nemo\Nemo.exe"
+          if (!(Test-Path $exe)) { Get-ChildItem "$env:LOCALAPPDATA\Programs" -Recurse -Filter Nemo.exe | Select -First 3; exit 1 }
+          $q = Start-Process $exe -ArgumentList "--selftest" -Wait -PassThru
+          Get-Content "$env:APPDATA\Nemo\selftest.log"
+          if ($q.ExitCode -ne 0) { exit 1 }
 
       - uses: actions/upload-artifact@v4
         with:
-          name: Nemo-windows
-          path: Nemo-windows.zip
+          name: Nemo-${{ steps.ver.outputs.version }}-windows
+          path: |
+            Nemo-${{ steps.ver.outputs.version }}-windows.zip
+            dist/Nemo-Setup-${{ steps.ver.outputs.version }}.exe
 
       - name: Release (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: Nemo-windows.zip
+          files: |
+            Nemo-${{ steps.ver.outputs.version }}-windows.zip
+            dist/Nemo-Setup-${{ steps.ver.outputs.version }}.exe
