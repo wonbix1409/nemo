@@ -28,14 +28,21 @@ LABELS = {
     "PHONE": "ТЕЛЕФОН",
     "EMAIL": "EMAIL",
     "PASSPORT": "ПАСПОРТ",
+    "DATE": "ДАТА",
+    "MONEY": "СУММА",
     "CUSTOM": "СКРЫТО",
 }
+
+# Косвенные данные: по ним человека можно узнать вместе с контекстом, но нейросети они
+# часто нужны для работы (сроки, суммы). Поэтому скрываются только по выбору пользователя.
+OPTIONAL_KINDS = ("DATE", "MONEY")
 
 # Чем выше — тем важнее при пересечении найденных фрагментов.
 PRIORITY = {
     "CUSTOM": 100,
     "EMAIL": 90, "CARD": 85, "ACCOUNT": 80, "PASSPORT": 80, "SNILS": 80,
     "OGRN": 78, "INN": 75, "KPP": 70, "BIK": 70, "PHONE": 70,
+    "MONEY": 66, "DATE": 65,
     "ADDR": 60, "ORG": 50, "PER": 45, "LOC": 30,
 }
 
@@ -172,6 +179,33 @@ RE_FIO_INITIALS = re.compile(
     r"(?<![А-ЯЁа-яё])(?:[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?\s+[А-ЯЁ]\.\s?[А-ЯЁ]\."
     r"|[А-ЯЁ]\.\s?[А-ЯЁ]\.\s?[А-ЯЁ][а-яё]+(?:-[А-ЯЁ][а-яё]+)?)"
 )
+
+_MONTHS = r"(?:январ|феврал|март|апрел|ма|июн|июл|август|сентябр|октябр|ноябр|декабр)[а-яё]*"
+_DAY = r"(?:0?[1-9]|[12]\d|3[01])"
+_YEAR_TAIL = r"(?:\s*(?:г\.|гг\.|года?|году))?"
+# 05.03.2026, 5.3.2026 г. — год только из 4 цифр, чтобы не задеть номера пунктов «3.1.12»
+RE_DATE_NUM = re.compile(NB + _DAY + r"\.(?:0?[1-9]|1[0-2])\.(?:19|20)\d{2}" + NA + _YEAR_TAIL)
+# «05» марта 2026 г., 5 марта 2026 года
+RE_DATE_TXT = re.compile(r"(?<![\w])[«\"]?" + _DAY + r"[»\"]?\s+" + _MONTHS + r"\s+(?:19|20)\d{2}"
+                         + NA + _YEAR_TAIL, re.I)
+_NUM = r"\d{1,3}(?:[ \u00a0]\d{3})+(?:[.,]\d{1,2})?|\d+(?:[.,]\d{1,2})?"
+_CUR = r"(?:рубл[а-яё]*|руб\.?|₽|р\.|доллар[а-яё]*|долл\.|USD|EUR|евро|\$|€)"
+# 1 250 000,00 руб.; 120 000 (сто двадцать тысяч) рублей 00 копеек; 500 ₽
+RE_MONEY = re.compile(
+    NB + r"(?:" + _NUM + r")(?:\s*\([^()\n]{3,160}\))?\s*" + _CUR
+    + r"(?:\s*\d{2}\s*(?:копе[а-яё]*|коп\.?))?", re.I)
+
+
+def find_optional(text: str, kinds) -> list[Entity]:
+    out: list[Entity] = []
+    if "DATE" in kinds:
+        for rx in (RE_DATE_NUM, RE_DATE_TXT):
+            for m in rx.finditer(text):
+                out.append(Entity(m.start(), m.end(), "DATE", m.group()))
+    if "MONEY" in kinds:
+        for m in RE_MONEY.finditer(text):
+            out.append(Entity(m.start(), m.end(), "MONEY", m.group()))
+    return out
 
 
 def find_regex(text: str) -> list[Entity]:

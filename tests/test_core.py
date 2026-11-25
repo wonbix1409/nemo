@@ -189,3 +189,82 @@ def test_case_context_ignores_tokens_and_signature_lines(ner):
     out, _, _ = s.restore("Генеральный директор\n[ОРГАНИЗАЦИЯ_1]\n________ / [ЧЕЛОВЕК_1.ИО] /\n"
                           "[ОРГАНИЗАЦИЯ_1] [ЧЕЛОВЕК_1]", ner=ner)
     assert out.endswith("/ Аркадий Геннадьевич /\nООО «Ромашка» Белоусов Аркадий Геннадьевич")
+
+
+# ---------------------------------------------------------------- 152-ФЗ: ключ и косвенные данные
+
+def test_optional_dates_and_money_off_by_default():
+    s = Session()
+    text = "Договор от 05.03.2026 г., цена 1 250 000,00 руб., п. 3.1.12."
+    masked, _ = s.anonymize(text)
+    assert masked == text
+
+
+def test_optional_dates_and_money_round_trip():
+    s = Session()
+    text = ("Договор от «12» марта 2026 года. Цена 120 000 (сто двадцать тысяч) рублей 00 копеек, "
+            "аванс 500 ₽ до 05.03.2026 г. См. п. 3.1.12, 15 сотрудников.")
+    masked, ents = s.anonymize(text, optional={"DATE", "MONEY"})
+    assert "[ДАТА_1]" in masked and "[СУММА_1]" in masked
+    assert "2026" not in masked and "рубл" not in masked
+    assert "3.1.12" in masked and "15 сотрудников" in masked
+    assert s.restore(masked)[0] == text
+
+
+def test_session_file_is_sealed_and_loads(tmp_path):
+    from nemo_core import vault
+    s = Session()
+    s.anonymize("ИНН 7707083893, почта ivanov@example.ru")
+    p = tmp_path / "k" / "session.nemo"
+    s.save(p)
+    raw = p.read_bytes()
+    assert raw.startswith((vault.HDR_DPAPI, vault.HDR_PLAIN))
+    assert b"7707083893" not in raw and b"ivanov" not in raw   # даже без DPAPI не лежит открытым текстом
+    s2 = Session.load(p)
+    assert s2.restore("[ИНН_1], [EMAIL_1]")[0] == "7707083893, ivanov@example.ru"
+    Session.wipe(p)
+    assert not p.exists()
+
+
+def test_legacy_plain_json_session_loads(tmp_path):
+    import json
+    s = Session()
+    s.anonymize("ИНН 7707083893")
+    p = tmp_path / "session.json"
+    p.write_text(json.dumps(s.to_dict(), ensure_ascii=False), encoding="utf-8")
+    assert Session.load(p).restore("[ИНН_1]")[0] == "7707083893"
+
+
+def test_session_age():
+    s = Session()
+    s.updated -= 8 * 86400
+    assert s.age_days() > 7
+
+
+def test_settings_and_journal_have_no_values(tmp_path):
+    from nemo_core.settings import Settings, journal_write
+    st = Settings(optional_kinds=["DATE", "BAD"], session_ttl_days=3, journal=True)
+    st.save(tmp_path / "settings.json")
+    st2 = Settings.load(tmp_path / "settings.json")
+    assert st2.optional_kinds == ["DATE"] and st2.session_ttl_days == 3
+    assert st2.session_path(tmp_path).name == "session.nemo"
+    s = Session()
+    _, ents = s.anonymize("ИНН 7707083893, тел. +7 912 345-67-89")
+    j = tmp_path / "journal.csv"
+    journal_write(j, "скрытие", [e.kind for e in ents])
+    body = j.read_text(encoding="utf-8-sig")
+    assert "INN=1" in body and "PHONE=1" in body
+    assert "7707083893" not in body and "345-67-89" not in body
+
+
+def test_abbreviation_before_name_keeps_nominative(ner):
+    for t in ("Получатель: ИП Гусейнова Лейла Рашидовна", "и гражданин РФ Миронов Святослав Игоревич"):
+        s = Session()
+        masked, _ = s.anonymize(t, ner=ner)
+        assert s.restore(masked, ner=ner)[0] == t
+
+
+def test_money_does_not_eat_sentence_period():
+    from nemo_core.detectors import find_optional
+    assert [e.text for e in find_optional("на сумму 4 870 500 рублей.", {"MONEY"})] == ["4 870 500 рублей"]
+    assert [e.text for e in find_optional("цена 1 250 000,00 руб. итого", {"MONEY"})] == ["1 250 000,00 руб."]
