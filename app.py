@@ -16,18 +16,20 @@ from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
 from nemo_core.anonymizer import AI_HINT, RE_TOKEN, Session
+from nemo_core import vault
 from nemo_core.detectors import NatashaNER
 from nemo_core.files import read_text_file
+from nemo_core.settings import Settings, journal_write
 
 APP_NAME = "Немо"
-VERSION = "1.0.1"
+VERSION = "1.1.0"
 REPO_URL = "https://github.com/wonbix1409/nemo"
 CONTACT_EMAIL = "hello@tselikom.ru"
 KIND_NAMES = {
     "PER": "Человек", "ORG": "Организация", "LOC": "Место", "ADDR": "Адрес",
     "INN": "ИНН", "SNILS": "СНИЛС", "OGRN": "ОГРН", "KPP": "КПП", "BIK": "БИК",
     "ACCOUNT": "Счёт", "CARD": "Карта", "PHONE": "Телефон", "EMAIL": "Почта",
-    "PASSPORT": "Паспорт", "CUSTOM": "Словарь / вручную",
+    "PASSPORT": "Паспорт", "DATE": "Дата", "MONEY": "Сумма", "CUSTOM": "Словарь / вручную",
 }
 
 # Палитра
@@ -50,7 +52,10 @@ class NemoApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.dir = data_dir()
-        self.session_path = self.dir / "session.json"
+        self.settings_path = self.dir / "settings.json"
+        self.settings = Settings.load(self.settings_path)
+        self.session_path = self.settings.session_path(self.dir)
+        self.journal_path = self.dir / "journal.csv"
         self.dict_path = self.dir / "dictionary.txt"
         if not self.dict_path.exists():
             self.dict_path.write_text(
@@ -58,10 +63,10 @@ class NemoApp:
                 "# Например, названия ваших клиентов, проектов, внутренние коды.\n",
                 encoding="utf-8",
             )
-        self.session = Session.load(self.session_path)
         self.ner = NatashaNER()
         self.hint_var = tk.BooleanVar(value=True)
         self.status_var = tk.StringVar(value="Загружаю модель распознавания имён…")
+        self.session = self._open_session()
 
         self._build_style()
         self._build_ui()
@@ -121,6 +126,7 @@ class NemoApp:
         ttk.Button(bar, text="Открыть файл…", command=self.open_file).pack(side="left")
         ttk.Button(bar, text="Словарь…", command=self.edit_dictionary).pack(side="left", padx=6)
         ttk.Button(bar, text="Новый сеанс", command=self.new_session).pack(side="left")
+        ttk.Button(bar, text="Настройки…", command=self.edit_settings).pack(side="left", padx=6)
         ttk.Button(bar, text="О программе", command=self.about).pack(side="right")
         ttk.Checkbutton(bar, text="Добавлять подсказку для нейросети",
                         variable=self.hint_var).pack(side="left", padx=16)
@@ -197,8 +203,8 @@ class NemoApp:
             tv.column(c, width=w, anchor="w")
         tv.pack(fill="both", expand=True)
         self.table = tv
-        ttk.Label(t3, text="Таблица хранится только на этом компьютере: "
-                           f"{self.session_path}", style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
+        self.store_var = tk.StringVar(value=self._store_note())
+        ttk.Label(t3, textvariable=self.store_var, style="Muted.TLabel").pack(anchor="w", pady=(6, 0))
 
         status = ttk.Frame(self.root, padding=(16, 2, 16, 8))
         status.pack(fill="x")
@@ -248,11 +254,13 @@ class NemoApp:
             self.status_var.set("Вставьте текст слева.")
             return
         ner = self.ner if self.ner.ready else None
-        masked, ents = self.session.anonymize(text, ner=ner, custom_words=self._custom_words())
+        masked, ents = self.session.anonymize(text, ner=ner, custom_words=self._custom_words(),
+                                              optional=set(self.settings.optional_kinds))
         self._set(self.masked, masked)
         self._highlight(self.masked, "token",
                         [(m.start(), m.end()) for m in RE_TOKEN.finditer(masked)])
-        self.session.save(self.session_path)
+        self._save_session()
+        self._journal("скрытие", [e.kind for e in ents])
         self._refresh_table()
         note = "" if ner else " (модель имён ещё не готова — скрыты только шаблоны)"
         self.status_var.set(f"Скрыто фрагментов: {len(ents)}.{note} Проверьте текст справа перед отправкой.")
@@ -284,6 +292,7 @@ class NemoApp:
         out, n, missing = self.session.restore(text, ner=self.ner if self.ner.ready else None)
         self._set(self.result, out)
         self._highlight(self.result, "restored", self.session.last_spans)
+        self._journal("возврат", [it.kind for it in self._restored_items(text)])
         msg = f"Возвращено значений: {n}."
         if missing:
             msg += f" Не нашлось в сеансе: {', '.join(sorted(set(missing))[:5])}."
@@ -304,7 +313,7 @@ class NemoApp:
                           "в старых ответах нейросети будет нельзя."):
             return
         self.session = Session()
-        self.session.save(self.session_path)
+        Session.wipe(self.session_path)
         for w in (self.src, self.masked, self.answer, self.result):
             self._set(w, "")
         self._refresh_table()
@@ -322,6 +331,10 @@ class NemoApp:
             messagebox.showerror(APP_NAME, f"Не удалось открыть файл:\n{e}")
             return
         self.nb.select(0)
+        if Path(path).resolve().parent == self.session_path.parent.resolve():
+            messagebox.showwarning(APP_NAME, "Документ лежит в той же папке, что и таблица меток. "
+                                   "Ключ лучше хранить отдельно от документов — "
+                                   "папку таблицы можно сменить в «Настройках».")
         self.anonymize()
 
     def _set_icon(self):
@@ -334,6 +347,129 @@ class NemoApp:
                 self.root.iconphoto(True, self._icon_img)
         except Exception:
             pass
+
+    # ------------------------------------------------------------------ сеанс и настройки
+    def _open_session(self) -> Session:
+        """Загружает сеанс с учётом настроек; переносит старый незашифрованный session.json."""
+        legacy = self.dir / "session.json"
+        if legacy.exists():
+            old = Session.load(legacy)
+            if self.settings.keep_session and old.items and not self.session_path.exists():
+                old.save(self.session_path)
+            Session.wipe(legacy)
+        if not self.settings.keep_session:
+            Session.wipe(self.session_path)
+            return Session()
+        s = Session.load(self.session_path)
+        ttl = self.settings.session_ttl_days
+        if s.items and ttl and s.age_days() > ttl:
+            Session.wipe(self.session_path)
+            self.status_var.set(f"Сеанс старше {ttl} дн. очищен автоматически.")
+            return Session()
+        return s
+
+    def _save_session(self):
+        if self.settings.keep_session:
+            try:
+                self.session.save(self.session_path)
+            except OSError as e:
+                messagebox.showerror(APP_NAME, f"Не удалось сохранить таблицу меток:\n{e}")
+
+    def _store_note(self) -> str:
+        if not self.settings.keep_session:
+            return "Таблица меток только в памяти: при закрытии Немо она исчезнет."
+        how = "зашифрована ключом вашей учётной записи Windows" if vault.available() else "без шифрования"
+        ttl = self.settings.session_ttl_days
+        tail = f", очищается через {ttl} дн." if ttl else ""
+        return f"Таблица меток: {self.session_path} — {how}{tail}"
+
+    def _restored_items(self, text: str):
+        out = []
+        for m in RE_TOKEN.finditer(text):
+            found = self.session._lookup(m.group("l1") or m.group("l2"), m.group("n1") or m.group("n2"))
+            if found:
+                out.append(found[0])
+        return out
+
+    def _journal(self, action: str, kinds: list[str]):
+        if self.settings.journal and kinds:
+            try:
+                journal_write(self.journal_path, action, kinds)
+            except OSError:
+                pass
+
+    def edit_settings(self):
+        win = tk.Toplevel(self.root)
+        win.title("Настройки Немо")
+        win.configure(bg=BG)
+        win.resizable(False, False)
+        box = ttk.Frame(win, padding=20)
+        box.pack(fill="both")
+        st = self.settings
+
+        ttk.Label(box, text="ДОПОЛНИТЕЛЬНО СКРЫВАТЬ", style="Cap.TLabel").pack(anchor="w")
+        v_date = tk.BooleanVar(value="DATE" in st.optional_kinds)
+        v_money = tk.BooleanVar(value="MONEY" in st.optional_kinds)
+        ttk.Checkbutton(box, text="Даты (05.03.2026, «5» марта 2026 г.)", variable=v_date).pack(anchor="w")
+        ttk.Checkbutton(box, text="Суммы (1 250 000 руб., сумма прописью)", variable=v_money).pack(anchor="w")
+        ttk.Label(box, style="Muted.TLabel", justify="left", text=(
+            "Даты и суммы вместе с контекстом могут указать на человека. Но если нейросеть\n"
+            "должна считать сроки или проверять суммы, без них она этого не сделает.")
+                  ).pack(anchor="w", pady=(2, 12))
+
+        ttk.Label(box, text="ТАБЛИЦА МЕТОК (КЛЮЧ)", style="Cap.TLabel").pack(anchor="w")
+        v_keep = tk.BooleanVar(value=st.keep_session)
+        ttk.Checkbutton(box, text="Сохранять между запусками (зашифрованной)",
+                        variable=v_keep).pack(anchor="w")
+        row = ttk.Frame(box)
+        row.pack(anchor="w", pady=4)
+        ttk.Label(row, text="Очищать, если сеанс старше (дней, 0 — никогда):").pack(side="left")
+        v_ttl = tk.StringVar(value=str(st.session_ttl_days))
+        ttk.Spinbox(row, from_=0, to=365, width=5, textvariable=v_ttl).pack(side="left", padx=6)
+        v_dir = tk.StringVar(value=st.session_dir)
+        row2 = ttk.Frame(box)
+        row2.pack(anchor="w", fill="x", pady=4)
+        ttk.Label(row2, text="Папка:").pack(side="left")
+        ttk.Label(row2, textvariable=v_dir, style="Muted.TLabel", width=46).pack(side="left", padx=6)
+
+        def pick():
+            d = filedialog.askdirectory(title="Папка для таблицы меток")
+            if d:
+                v_dir.set(d)
+
+        ttk.Button(row2, text="Выбрать…", command=pick).pack(side="left")
+        ttk.Button(row2, text="По умолчанию", command=lambda: v_dir.set("")).pack(side="left", padx=4)
+        ttk.Label(box, style="Muted.TLabel", justify="left", text=(
+            "Пусто — папка Немо в профиле Windows. Ключ лучше хранить отдельно от документов,\n"
+            "например на отдельном или зашифрованном диске.")).pack(anchor="w", pady=(0, 12))
+
+        ttk.Label(box, text="ЖУРНАЛ", style="Cap.TLabel").pack(anchor="w")
+        v_journal = tk.BooleanVar(value=st.journal)
+        ttk.Checkbutton(box, text="Вести журнал операций (время, пользователь, сколько и чего скрыто —\n"
+                                  "без самих данных)", variable=v_journal).pack(anchor="w")
+        ttk.Label(box, text=str(self.journal_path), style="Muted.TLabel").pack(anchor="w", pady=(0, 12))
+
+        def save():
+            try:
+                ttl = max(0, int(v_ttl.get()))
+            except ValueError:
+                ttl = st.session_ttl_days
+            old_path = self.session_path
+            st.optional_kinds = [k for k, v in (("DATE", v_date), ("MONEY", v_money)) if v.get()]
+            st.keep_session = v_keep.get()
+            st.session_ttl_days = ttl
+            st.session_dir = v_dir.get()
+            st.journal = v_journal.get()
+            st.save(self.settings_path)
+            self.session_path = st.session_path(self.dir)
+            if self.session_path != old_path or not st.keep_session:
+                Session.wipe(old_path)
+            self._save_session()
+            self.store_var.set(self._store_note())
+            self.status_var.set("Настройки сохранены.")
+            win.destroy()
+
+        ttk.Button(box, text="Сохранить", style="Accent.TButton", command=save).pack(anchor="e")
 
     def about(self):
         win = tk.Toplevel(self.root)
@@ -348,9 +484,11 @@ class NemoApp:
             "перед отправкой текста в нейросеть и возвращает их в ответ —\n"
             "с нужным падежом.\n\n"
             "Всё работает на этом компьютере, без интернета.\n"
-            f"Таблица меток: {self.session_path}\n\n"
-            "Немо снижает риск утечки, но не делает текст полностью анонимным:\n"
-            "перед отправкой проверьте правую панель.\n\n"
+            f"Таблица меток: {self._store_note()}\n\n"
+            "Немо заменяет данные метками (метод введения идентификаторов).\n"
+            "Это снижает риск, но текст с метками по закону остаётся\n"
+            "персональными данными: даты, суммы и контекст могут указать\n"
+            "на человека. Перед отправкой проверьте правую панель.\n\n"
             f"По вопросам продукта для компаний: {CONTACT_EMAIL}\n"
             "Лицензия AGPL-3.0."),
             style="Muted.TLabel").pack(anchor="w", pady=(8, 12))
@@ -408,6 +546,16 @@ def selftest() -> int:
     masked, _ = s.anonymize(text, ner=ner if ok else None)
     out("Скрыто:  ", masked)
     out("Обратно: ", s.restore(masked, ner=ner if ok else None)[0])
+    secret = "Иванов Иван Петрович".encode("utf-8")
+    try:
+        sealed = vault.seal(secret)
+        enc_ok = vault.unseal(sealed) == secret and (secret not in sealed)
+        out("Шифрование таблицы:", ("DPAPI" if vault.is_sealed(sealed) else "нет (не Windows)"),
+            "OK" if enc_ok else "ОШИБКА")
+    except Exception as e:
+        enc_ok = False
+        out("Шифрование таблицы: ОШИБКА", e)
+    ok = ok and enc_ok
     log = data_dir() / "selftest.log"
     log.write_text("\n".join(lines), encoding="utf-8")
     print("Лог:", log)

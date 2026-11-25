@@ -276,6 +276,10 @@ def infer_case(prefix: str, vocab) -> tuple[str | None, bool]:
         return PREP_CASE[last], True
     if last == "ип" and len(words) >= 2 and words[-2].lower() in PREP_CASE:
         return PREP_CASE[words[-2].lower()], True
+    # Аббревиатура перед именем («ИП», «гражданин РФ») падеж не задаёт — верим метке
+    raw_last = words[-1]
+    if len(raw_last) <= 5 and raw_last.isupper():
+        return None, False
     try:
         parses = [p for p in _raw_parse(vocab, last) if "plur" not in p.tag] or _raw_parse(vocab, last)
     except Exception:
