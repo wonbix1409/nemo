@@ -9,6 +9,7 @@ import os
 import sys
 import threading
 import tkinter as tk
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -18,7 +19,8 @@ from nemo_core.detectors import NatashaNER
 from nemo_core.files import read_text_file
 
 APP_NAME = "Немо"
-VERSION = "0.2.0"
+VERSION = "1.0.0"
+REPO_URL = "https://github.com/wonbix1409/nemo"
 KIND_NAMES = {
     "PER": "Человек", "ORG": "Организация", "LOC": "Место", "ADDR": "Адрес",
     "INN": "ИНН", "SNILS": "СНИЛС", "OGRN": "ОГРН", "KPP": "КПП", "BIK": "БИК",
@@ -67,7 +69,8 @@ class NemoApp:
     # ------------------------------------------------------------------ вид
     def _build_style(self):
         r = self.root
-        r.title(f"{APP_NAME} — ваши данные остаются у вас")
+        r.title(f"{APP_NAME} {VERSION} — ваши данные остаются у вас")
+        self._set_icon()
         r.geometry("1180x760")
         r.minsize(900, 560)
         r.configure(bg=BG)
@@ -116,6 +119,7 @@ class NemoApp:
         ttk.Button(bar, text="Открыть файл…", command=self.open_file).pack(side="left")
         ttk.Button(bar, text="Словарь…", command=self.edit_dictionary).pack(side="left", padx=6)
         ttk.Button(bar, text="Новый сеанс", command=self.new_session).pack(side="left")
+        ttk.Button(bar, text="О программе", command=self.about).pack(side="right")
         ttk.Checkbutton(bar, text="Добавлять подсказку для нейросети",
                         variable=self.hint_var).pack(side="left", padx=16)
 
@@ -145,6 +149,8 @@ class NemoApp:
         ttk.Button(b1, text="Вставить из буфера",
                    command=lambda: self._paste(self.src)).pack(side="left")
         ttk.Button(b1, text="Скрыть выделенное", command=self.hide_selection).pack(side="left", padx=6)
+        ttk.Button(b1, text="Очистить",
+                   command=lambda: [self._set(w, "") for w in (self.src, self.masked)]).pack(side="left")
         ttk.Button(b1, text="Скопировать для нейросети", style="Accent.TButton",
                    command=self.copy_masked).pack(side="right")
         ttk.Button(b1, text="Скрыть данные  →  (Ctrl+Enter)", style="Accent.TButton",
@@ -171,6 +177,8 @@ class NemoApp:
         b2.pack(fill="x", pady=(8, 0))
         ttk.Button(b2, text="Вставить из буфера",
                    command=lambda: (self._paste(self.answer), self.restore())).pack(side="left")
+        ttk.Button(b2, text="Очистить",
+                   command=lambda: [self._set(w, "") for w in (self.answer, self.result)]).pack(side="left", padx=6)
         ttk.Button(b2, text="Скопировать результат", style="Accent.TButton",
                    command=self.copy_result).pack(side="right")
         ttk.Button(b2, text="Вернуть данные  →", style="Accent.TButton",
@@ -271,16 +279,9 @@ class NemoApp:
 
     def restore(self):
         text = self.answer.get("1.0", "end-1c")
-        out, n, missing = self.session.restore(text)
+        out, n, missing = self.session.restore(text, ner=self.ner if self.ner.ready else None)
         self._set(self.result, out)
-        # подсветка подставленных значений
-        spans = []
-        for it in self.session.items.values():
-            start = 0
-            while (i := out.find(it.value, start)) != -1 and it.value:
-                spans.append((i, i + len(it.value)))
-                start = i + len(it.value)
-        self._highlight(self.result, "restored", spans)
+        self._highlight(self.result, "restored", self.session.last_spans)
         msg = f"Возвращено значений: {n}."
         if missing:
             msg += f" Не нашлось в сеансе: {', '.join(sorted(set(missing))[:5])}."
@@ -320,6 +321,36 @@ class NemoApp:
             return
         self.nb.select(0)
         self.anonymize()
+
+    def _set_icon(self):
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+        try:
+            if sys.platform == "win32" and (base / "assets" / "nemo.ico").exists():
+                self.root.iconbitmap(default=str(base / "assets" / "nemo.ico"))
+            elif (base / "assets" / "nemo.png").exists():
+                self._icon_img = tk.PhotoImage(file=str(base / "assets" / "nemo.png")).subsample(16, 16)
+                self.root.iconphoto(True, self._icon_img)
+        except Exception:
+            pass
+
+    def about(self):
+        win = tk.Toplevel(self.root)
+        win.title(f"О программе {APP_NAME}")
+        win.configure(bg=BG)
+        win.resizable(False, False)
+        box = ttk.Frame(win, padding=24)
+        box.pack()
+        ttk.Label(box, text=f"◖ {APP_NAME} {VERSION}", style="Title.TLabel").pack(anchor="w")
+        ttk.Label(box, justify="left", text=(
+            "Прячет ФИО, организации, адреса, реквизиты и контакты\n"
+            "перед отправкой текста в нейросеть и возвращает их в ответ —\n"
+            "с нужным падежом.\n\n"
+            "Всё работает на этом компьютере, без интернета.\n"
+            f"Таблица меток: {self.session_path}\n\n"
+            "Немо снижает риск утечки, но не делает текст полностью анонимным:\n"
+            "перед отправкой проверьте правую панель."),
+            style="Muted.TLabel").pack(anchor="w", pady=(8, 12))
+        ttk.Button(box, text="Исходный код на GitHub", command=lambda: webbrowser.open(REPO_URL)).pack(anchor="w")
 
     def edit_dictionary(self):
         win = tk.Toplevel(self.root)
@@ -365,7 +396,7 @@ def selftest() -> int:
             "тел. +7 912 345-67-89, г. Пермь, ул. Ленина, д. 50.")
     masked, _ = s.anonymize(text, ner=ner if ok else None)
     out("Скрыто:  ", masked)
-    out("Обратно: ", s.restore(masked)[0])
+    out("Обратно: ", s.restore(masked, ner=ner if ok else None)[0])
     log = data_dir() / "selftest.log"
     log.write_text("\n".join(lines), encoding="utf-8")
     print("Лог:", log)

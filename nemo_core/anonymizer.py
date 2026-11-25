@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .declension import (decline_person, decline_place, detect_case, gender_of,
+                         infer_case, normalize_case)
 from .detectors import (LABELS, Entity, NatashaNER, find_custom, find_regex,
                         fullness, is_patronymic, normalize_fio, person_signature,
                         resolve_overlaps, same_person, trim_person)
@@ -21,17 +23,22 @@ def person_form(sig: dict) -> str:
 
 AI_HINT = (
     "Важно: в тексте ниже персональные данные заменены метками в квадратных скобках, "
-    "например [ЧЕЛОВЕК_1] или [ИНН_2]. Используй эти метки в ответе ровно в таком виде, "
-    "не склоняй и не изменяй их. Метки с одним номером — один и тот же человек: "
-    "[ЧЕЛОВЕК_1.ИО] — он же по имени и отчеству, [ЧЕЛОВЕК_1.ИНИЦ] — он же с инициалами.\n\n"
+    "например [ЧЕЛОВЕК_1] или [ИНН_2]. Пиши метки в ответе так же, в квадратных скобках, "
+    "не меняя слов и номеров внутри. Падеж указан после черты: [ЧЕЛОВЕК_1|рд] — родительный "
+    "(кого?), |дт — дательный (кому?), |вн — винительный, |тв — творительный (кем?), "
+    "|пр — предложный (о ком?); без черты — именительный. Когда в твоём ответе человек или место "
+    "стоит в другом падеже, ставь нужную черту сам, например «полномочия [ЧЕЛОВЕК_1|рд]». "
+    "Метки с одним номером — один и тот же человек: [ЧЕЛОВЕК_1.ИО] — он же по имени и отчеству, "
+    "[ЧЕЛОВЕК_1.ИНИЦ] — он же с инициалами.\n\n"
 )
 
 # Метка в ответе нейросети: допускаем потерянные скобки, пробел/дефис вместо «_», Е вместо Ё.
 _LABEL_ALT = "|".join(sorted({re.escape(v) for v in LABELS.values()} | {"СЧЕТ"}, key=len, reverse=True))
 # Без скобок принимаем только вариант с подчёркиванием, чтобы не задеть обычное «место 1».
 RE_TOKEN = re.compile(
-    r"\[\s*(" + _LABEL_ALT + r")[ _\-]?(\d+)(?:\.(ИО|ИНИЦ))?\s*\]"
-    r"|(?<![\w])(" + _LABEL_ALT + r")_(\d+)(?:\.(ИО|ИНИЦ))?(?![\w])",
+    r"\[\s*(?P<l1>" + _LABEL_ALT + r")[ _\-]?(?P<n1>\d+)(?:\.(?P<f1>ИО|ИНИЦ))?"
+    r"(?:\s*\|\s*(?P<c1>[А-Яа-яЁё.]{1,12}))?\s*\]"
+    r"|(?<![\w])(?P<l2>" + _LABEL_ALT + r")_(?P<n2>\d+)(?:\.(?P<f2>ИО|ИНИЦ))?(?![\w])",
     re.I,
 )
 
@@ -122,46 +129,69 @@ class Session:
         parts, pos = [], 0
         for e in ents:
             parts.append(text[pos:e.start])
-            parts.append(self._token_for(e))
+            tok = self._token_for(e)
+            if e.kind == "PER":
+                case = detect_case(e.text, vocab)
+                if case:
+                    tok = tok[:-1] + f"|{case}]"
+            parts.append(tok)
             pos = e.end
         parts.append(text[pos:])
         return "".join(parts), ents
 
     # ------------------------------------------------------------ возврат
-    def _lookup(self, label: str, num: str, form: str | None = None) -> str | None:
+    def _lookup(self, label: str, num: str, form: str | None = None) -> tuple[Item, str] | None:
         label = label.upper().replace("СЧЕТ", "СЧЁТ")
         it = self.items.get(f"[{label}_{int(num)}]")
         if it is None:
             return None
         if not form:
-            return it.value
+            return it, it.value
         form = form.upper()
         if form in it.forms:
-            return it.forms[form]
+            return it, it.forms[form]
         # Нейросеть сама придумала форму («Уважаемый [ЧЕЛОВЕК_2.ИО]!») — строим её из полного ФИО
         w = it.value.split()
         if it.kind == "PER" and len(w) == 3:
-            return " ".join(w[1:]) if form == "ИО" else f"{w[0]} {w[1][0]}.{w[2][0]}."
-        return it.value
+            return it, (" ".join(w[1:]) if form == "ИО" else f"{w[0]} {w[1][0]}.{w[2][0]}.")
+        return it, it.value
 
-    def restore(self, text: str) -> tuple[str, int, list[str]]:
-        """Возвращает (текст, сколько подставлено, метки без соответствия)."""
+    def restore(self, text: str, ner: NatashaNER | None = None) -> tuple[str, int, list[str]]:
+        """Возвращает (текст, сколько подставлено, метки без соответствия).
+        Метки с падежом ([ЧЕЛОВЕК_1|рд]) склоняются. Позиции подстановок — в self.last_spans."""
+        vocab = ner._parts["vocab"] if (ner is not None and ner.ready) else None
         missing: list[str] = []
         count = 0
-
-        def repl(m: re.Match) -> str:
-            nonlocal count
-            label = m.group(1) or m.group(4)
-            num = m.group(2) or m.group(5)
-            form = m.group(3) or m.group(6)
-            value = self._lookup(label, num, form)
-            if value is None:
+        out, pos, spans = [], 0, []
+        for m in RE_TOKEN.finditer(text):
+            label = m.group("l1") or m.group("l2")
+            num = m.group("n1") or m.group("n2")
+            form = m.group("f1") or m.group("f2")
+            case = normalize_case(m.group("c1"))
+            found = self._lookup(label, num, form)
+            out.append(text[pos:m.start()])
+            pos = m.end()
+            if found is None:
                 missing.append(m.group(0))
-                return m.group(0)
+                out.append(m.group(0))
+                continue
+            it, value = found
+            if it.kind == "PER":
+                # Нейросеть не всегда ставит падеж (или копирует чужой) — подстраховываемся контекстом
+                guess, sure = infer_case(text[:m.start()], vocab)
+                if guess and (sure or not case):
+                    case = guess
+            if case and it.kind == "PER":
+                value = decline_person(value, case, vocab, gender_of(it.value.split()))
+            elif case and it.kind == "LOC":
+                value = decline_place(value, case, vocab)
+            start = sum(len(x) for x in out)
+            out.append(value)
+            spans.append((start, start + len(value)))
             count += 1
-            return value
-
-        return RE_TOKEN.sub(repl, text), count, missing
+        out.append(text[pos:])
+        self.last_spans = spans
+        return "".join(out), count, missing
 
     # ------------------------------------------------------------ хранение
     def to_dict(self) -> dict:
