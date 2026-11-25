@@ -10,6 +10,7 @@ import sys
 import threading
 import tkinter as tk
 import webbrowser
+from urllib.parse import quote
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -19,8 +20,9 @@ from nemo_core.detectors import NatashaNER
 from nemo_core.files import read_text_file
 
 APP_NAME = "Немо"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 REPO_URL = "https://github.com/wonbix1409/nemo"
+CONTACT_EMAIL = "hello@tselikom.ru"
 KIND_NAMES = {
     "PER": "Человек", "ORG": "Организация", "LOC": "Место", "ADDR": "Адрес",
     "INN": "ИНН", "SNILS": "СНИЛС", "OGRN": "ОГРН", "KPP": "КПП", "BIK": "БИК",
@@ -348,9 +350,18 @@ class NemoApp:
             "Всё работает на этом компьютере, без интернета.\n"
             f"Таблица меток: {self.session_path}\n\n"
             "Немо снижает риск утечки, но не делает текст полностью анонимным:\n"
-            "перед отправкой проверьте правую панель."),
+            "перед отправкой проверьте правую панель.\n\n"
+            f"По вопросам продукта для компаний: {CONTACT_EMAIL}\n"
+            "Лицензия AGPL-3.0."),
             style="Muted.TLabel").pack(anchor="w", pady=(8, 12))
-        ttk.Button(box, text="Исходный код на GitHub", command=lambda: webbrowser.open(REPO_URL)).pack(anchor="w")
+        row = ttk.Frame(box)
+        row.pack(anchor="w")
+        ttk.Button(row, text="Написать о версии для компании",
+                   command=lambda: webbrowser.open(
+                       f"mailto:{CONTACT_EMAIL}?subject={quote('Немо для компании')}")
+                   ).pack(side="left")
+        ttk.Button(row, text="Исходный код на GitHub",
+                   command=lambda: webbrowser.open(REPO_URL)).pack(side="left", padx=6)
 
     def edit_dictionary(self):
         win = tk.Toplevel(self.root)
