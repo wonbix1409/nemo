@@ -262,3 +262,9 @@ def test_abbreviation_before_name_keeps_nominative(ner):
         s = Session()
         masked, _ = s.anonymize(t, ner=ner)
         assert s.restore(masked, ner=ner)[0] == t
+
+
+def test_money_does_not_eat_sentence_period():
+    from nemo_core.detectors import find_optional
+    assert [e.text for e in find_optional("на сумму 4 870 500 рублей.", {"MONEY"})] == ["4 870 500 рублей"]
+    assert [e.text for e in find_optional("цена 1 250 000,00 руб. итого", {"MONEY"})] == ["1 250 000,00 руб."]
