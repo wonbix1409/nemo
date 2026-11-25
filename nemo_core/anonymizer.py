@@ -3,12 +3,14 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .declension import (decline_person, decline_place, detect_case, gender_of,
                          infer_case, normalize_case)
-from .detectors import (LABELS, Entity, NatashaNER, find_custom, find_regex,
+from . import vault
+from .detectors import (LABELS, Entity, NatashaNER, find_custom, find_optional, find_regex,
                         fullness, is_patronymic, normalize_fio, person_signature,
                         resolve_overlaps, same_person, trim_person)
 
@@ -61,6 +63,8 @@ class Session:
         self.by_key: dict[str, str] = {}       # entity.key -> token
         self.counters: dict[str, int] = {}
         self.manual: list[str] = []            # фразы, которые пользователь скрыл вручную
+        self.updated: float = time.time()      # когда сеанс последний раз менялся
+        self.last_spans: list[tuple[int, int]] = []
 
     # ------------------------------------------------------------ скрытие
     def _token_for(self, e: Entity) -> str:
@@ -104,8 +108,10 @@ class Session:
 
     def anonymize(self, text: str, ner: NatashaNER | None = None,
                   custom_words: list[str] | None = None,
-                  manual: list[str] | None = None) -> tuple[str, list[Entity]]:
-        ents = find_regex(text)
+                  manual: list[str] | None = None,
+                  optional: set[str] | frozenset[str] = frozenset()) -> tuple[str, list[Entity]]:
+        """optional — какие косвенные данные скрывать дополнительно: {"DATE", "MONEY"}."""
+        ents = find_regex(text) + find_optional(text, optional)
         if ner is not None:
             ents += ner.find(text)
         ents += find_custom(text, (custom_words or []) + self.manual + (manual or []))
@@ -200,6 +206,7 @@ class Session:
             "by_key": self.by_key,
             "counters": self.counters,
             "manual": self.manual,
+            "updated": self.updated,
         }
 
     @classmethod
@@ -211,15 +218,39 @@ class Session:
         s.by_key = dict(d.get("by_key", {}))
         s.counters = dict(d.get("counters", {}))
         s.manual = list(d.get("manual", []))
+        s.updated = float(d.get("updated", time.time()))
         return s
 
+    def age_days(self, now: float | None = None) -> float:
+        return ((now or time.time()) - self.updated) / 86400
+
     def save(self, path: Path) -> None:
+        """Таблица соответствий — это ключ к обезличенному тексту, поэтому на диске она
+        зашифрована (Windows DPAPI, см. vault.py) и пишется атомарно."""
+        self.updated = time.time()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(self.to_dict(), ensure_ascii=False, indent=1), encoding="utf-8")
+        data = json.dumps(self.to_dict(), ensure_ascii=False, indent=1).encode("utf-8")
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_bytes(vault.seal(data))
+        tmp.replace(path)
 
     @classmethod
     def load(cls, path: Path) -> "Session":
         try:
-            return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))
+            raw = path.read_bytes()
+        except OSError:
+            return cls()
+        try:
+            return cls.from_dict(json.loads(vault.unseal(raw).decode("utf-8")))
         except Exception:
             return cls()
+
+    @staticmethod
+    def wipe(path: Path) -> None:
+        """Удалить файл сеанса, предварительно затерев содержимое."""
+        try:
+            if path.exists():
+                path.write_bytes(b"\0" * max(path.stat().st_size, 1))
+                path.unlink()
+        except OSError:
+            pass
